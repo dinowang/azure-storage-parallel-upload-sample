@@ -189,11 +189,6 @@ namespace Upload
             {
                 stopwatch.Restart();
 
-                var blobRequest = new BlobRequestOptions()
-                {
-
-                };
-
                 using (var concurrencySemaphore = new SemaphoreSlim(parallelize))
                 {
                     var tasks = taskParams
