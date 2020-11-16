@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -9,6 +10,8 @@ using System.Threading.Tasks;
 using Microsoft.Azure.Storage;
 using Microsoft.Azure.Storage.Blob;
 using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
+using Polly;
 
 namespace Upload
 {
@@ -19,12 +22,18 @@ namespace Upload
             var config = new ConfigurationBuilder()
                                 .SetBasePath(Directory.GetCurrentDirectory())
                                 .AddJsonFile("appsettings.json", false)
+                                .AddJsonFile("appsettings.Debug.json", false)
                                 .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("NETCORE_ENVIRONMENT")}.json", optional: true)
                                 .Build();
 
             var storageConnectionString = config.GetValue<string>("StorageConnectionString");
             var sourceUri = new Uri(config.GetValue<string>("SourceUri"));
-            var sourceFile = Path.GetFileName(sourceUri.LocalPath);
+            var sourceFile = config.GetValue<string>("SourceFile");
+
+            if (string.IsNullOrEmpty(sourceFile))
+            {
+                sourceFile = Path.GetFileName(sourceUri.LocalPath);
+            }
 
             if (!File.Exists(sourceFile))
             {
@@ -52,6 +61,16 @@ namespace Upload
             var container = client.GetContainerReference("file");
             await container.CreateIfNotExistsAsync();
 
+            // var fileInfo2 = new FileInfo(sourceFile);
+            // Console.WriteLine($"origin: {fileInfo.Name} => {fileInfo2.Length}");
+            // var b1 = container.GetBlockBlobReference("Build-2019-Keynote-Satya.mp4.parallel");
+            // b1.FetchAttributes();
+            // Console.WriteLine($"    b1: {b1.Name} => {b1.Properties.Length}");
+            // var b2 = container.GetBlockBlobReference("Build-2019-Keynote-Satya.mp4.azcopy");
+            // b2.FetchAttributes();
+            // Console.WriteLine($"    b2: {b2.Name} => {b2.Properties.Length}");
+            // return;
+
             var stopwatch = new Stopwatch();
 
             /// Blob
@@ -61,100 +80,117 @@ namespace Upload
 
             /// Simple Upload
             /// 
-            Console.WriteLine($"simple upload:");
-            var blob = container.GetBlockBlobReference(sourceFile + ".simple");
-            Console.WriteLine($"\tto: {blob.Uri}");
-            if (await blob.ExistsAsync())
-            {
-                Console.WriteLine($"\tcleanup");
-                await blob.DeleteIfExistsAsync();
-            }
-            stopwatch.Start();
-            await blob.UploadFromFileAsync(filePath);
-            stopwatch.Stop();
-            Console.WriteLine($"\telapsed: {stopwatch.ElapsedMilliseconds:##,#} ms");
-            Console.WriteLine($"\tthroughput: {(fileSize / stopwatch.ElapsedMilliseconds):##,#} bytes/sec (~{(fileSize / stopwatch.ElapsedMilliseconds) * 8:##,#} bps)");
-            Console.WriteLine();
+            // Console.WriteLine($"simple upload:");
+            // var blob = container.GetBlockBlobReference(Path.GetFileName(sourceFile) + ".simple");
+            // Console.WriteLine($"\tto: {blob.Uri}");
+            // if (await blob.ExistsAsync())
+            // {
+            //     Console.WriteLine($"\tcleanup");
+            //     await blob.DeleteIfExistsAsync();
+            // }
+            // stopwatch.Start();
+            // await blob.UploadFromFileAsync(filePath);
+            // stopwatch.Stop();
+            // Console.WriteLine($"\telapsed: {stopwatch.ElapsedMilliseconds:##,#} ms");
+            // Console.WriteLine($"\tthroughput: {(fileSize / stopwatch.ElapsedMilliseconds):##,#} bytes/sec (~{(fileSize / stopwatch.ElapsedMilliseconds) * 8:##,#} bps)");
+            // Console.WriteLine();
 
             /// Simple Upload with BlobRequestOptions
             /// 
-            Console.WriteLine($"simple upload with `ParallelOperationThreadCount`:");
-            blob = container.GetBlockBlobReference(sourceFile + ".simple-parallel");
-            Console.WriteLine($"\tto: {blob.Uri}");
-            if (await blob.ExistsAsync())
-            {
-                Console.WriteLine($"\tcleanup");
-                await blob.DeleteIfExistsAsync();
-            }
-            stopwatch.Restart();
-            var parallelOptions = new BlobRequestOptions
-            {
-                ParallelOperationThreadCount = 10
-            };
-            await blob.UploadFromFileAsync(filePath, null, parallelOptions, null);
-            stopwatch.Stop();
-            Console.WriteLine($"\telapsed: {stopwatch.ElapsedMilliseconds:##,#} ms");
-            Console.WriteLine($"\tthroughput: {(fileSize / stopwatch.ElapsedMilliseconds):##,#} bytes/sec (~{(fileSize / stopwatch.ElapsedMilliseconds) * 8:##,#} bps)");
-            Console.WriteLine();
+            // Console.WriteLine($"simple upload with `ParallelOperationThreadCount`:");
+            // blob = container.GetBlockBlobReference(Path.GetFileName(sourceFile) + ".simple-parallel");
+            // Console.WriteLine($"\tto: {blob.Uri}");
+            // if (await blob.ExistsAsync())
+            // {
+            //     Console.WriteLine($"\tcleanup");
+            //     await blob.DeleteIfExistsAsync();
+            // }
+            // stopwatch.Restart();
+            // var parallelOptions = new BlobRequestOptions
+            // {
+            //     ParallelOperationThreadCount = 10
+            // };
+            // await blob.UploadFromFileAsync(filePath, null, parallelOptions, null);
+            // stopwatch.Stop();
+            // Console.WriteLine($"\telapsed: {stopwatch.ElapsedMilliseconds:##,#} ms");
+            // Console.WriteLine($"\tthroughput: {(fileSize / stopwatch.ElapsedMilliseconds):##,#} bytes/sec (~{(fileSize / stopwatch.ElapsedMilliseconds) * 8:##,#} bps)");
+            // Console.WriteLine();
 
             /// Parallel Upload
             /// 
             Console.WriteLine($"parallel upload:");
-            blob = container.GetBlockBlobReference(sourceFile + ".parallel");
+            var blob = container.GetBlockBlobReference(Path.GetFileName(sourceFile) + ".parallel");
             Console.WriteLine($"\tto: {blob.Uri}");
 
             // var blockSize = 1024 * 1024 * 10; //10MB
-            var blockSize = 1024 * 1024 * 5; //5MB
+            // var blockSize = 1024 * 1024 * 5; //5MB
+            var blockSize = 1024 * 1024 * 100; //100MB
             // var blockSize = 1024 * 1024 * 1; //1MB
+
             var uploadedBlock = Enumerable.Empty<ListBlockItem>();
 
-            if (await blob.ExistsAsync())
+            try
             {
-                uploadedBlock = await blob.DownloadBlockListAsync();
-
-                if (!uploadedBlock.Any())
-                {
-                    Console.WriteLine("\tcleanup");
-                    await blob.DeleteIfExistsAsync();
-                }
-                else
-                {
-                    Console.WriteLine($"\tprevious upload {uploadedBlock.Count()} block(s) found!");
-                    Console.Write($"\t\tpress Y for continue, N for delete and restart. [Y/n] ");
-
-                    var readKey = true;
-                    while (readKey)
-                    {
-                        var input = Console.ReadKey();
-                        switch (input.Key)
-                        {
-                            case ConsoleKey.N:
-                                Console.WriteLine("\n\tremove previous uploads");
-                                readKey = false;
-                                uploadedBlock = Enumerable.Empty<ListBlockItem>();
-                                await blob.DeleteIfExistsAsync();
-                                break;
-                            case ConsoleKey.Enter:
-                            case ConsoleKey.Y:
-                                Console.WriteLine("\n\tcontinue to upload");
-                                blockSize = (int)uploadedBlock.First().Length;
-                                readKey = false;
-                                break;
-                        }
-                    }
-                }
+                uploadedBlock = await blob.DownloadBlockListAsync(BlockListingFilter.Uncommitted,
+                                                                  AccessCondition.GenerateEmptyCondition(),
+                                                                  new BlobRequestOptions { },
+                                                                  new OperationContext { });
+            }
+            catch (StorageException)
+            {
             }
 
+            if (!uploadedBlock.Any())
+            {
+                // Console.WriteLine("\tcleanup");
+                // await blob.DeleteIfExistsAsync();
+            }
+            else
+            {
+                Console.WriteLine($"\tprevious upload {uploadedBlock.Count()} block(s) found!");
+                uploadedBlock.ToList().ForEach(x =>
+                {
+                    var n = BitConverter.ToInt16(Convert.FromBase64String(x.Name));
+                    Console.WriteLine($"\t\tblock: {x.Name} ({n}), length: {x.Length}, committed: {x.Committed}");
+                });
+                Console.Write($"\t\tpress Y for continue, N for new upload, C for commit to file. [Y/n/c] ");
+
+                var readKey = true;
+                while (readKey)
+                {
+                    var input = Console.ReadKey();
+                    switch (input.Key)
+                    {
+                        case ConsoleKey.C:
+                            await blob.PutBlockListAsync(uploadedBlock.Select(x => x.Name));
+                            return;
+                        case ConsoleKey.N:
+                            readKey = false;
+                            uploadedBlock = Enumerable.Empty<ListBlockItem>();
+                            // await blob.DeleteIfExistsAsync();
+                            break;
+                        case ConsoleKey.Enter:
+                        case ConsoleKey.Y:
+                            Console.WriteLine("\n\tcontinue to upload");
+                            blockSize = (int)uploadedBlock.First().Length;
+                            readKey = false;
+                            break;
+                    }
+                }
+                Console.WriteLine();
+            }
+
+
             var taskCount = (int)Math.Ceiling((double)fileSize / blockSize);
-            var parallelize = 10;
+            var parallelize = 5;
 
             var taskParams = Enumerable
-                                .Range(0, taskCount)
+                                .Range(1, taskCount)
                                 .Select(x =>
                                 {
-                                    var start = x * blockSize;
-                                    var end = (int)Math.Min(start + blockSize - 1, fileSize);
-                                    var length = end - start + 1;
+                                    long start = (x - 1) * (long)blockSize;
+                                    long end = Math.Min(start + blockSize - 1, fileSize - 1);
+                                    int length = (int)(end - start + 1);
                                     var blockId = Convert.ToBase64String(BitConverter.GetBytes(x));
 
                                     Func<Task<(byte[], string)>> get = async () =>
@@ -175,46 +211,81 @@ namespace Upload
                                 .Where(x => !uploadedBlock.Select(u => u.Name).Contains(x.BlockId))
                                 .ToList();
 
-            if (!taskParams.Any())
-            {
-                Console.WriteLine("\tno more upload task need to complete.");
-                return;
-            }
-
-            Console.WriteLine($"\tblock size: {blockSize:##,#} bytes");
-            Console.WriteLine($"\ttasks: {taskCount}");
-            Console.WriteLine($"\tparallelize: {parallelize}");
-
             try
             {
-                stopwatch.Restart();
-
-                using (var concurrencySemaphore = new SemaphoreSlim(parallelize))
+                if (!taskParams.Any())
                 {
-                    var tasks = taskParams
-                                    .Select(x => Task.Run(async () =>
-                                    {
-                                        await Task.Delay(x.N * 100);
-                                        await concurrencySemaphore.WaitAsync();
-                                        var (buffer, hash) = await x.GetBufferAsync();
-                                        await blob
-                                                .PutBlockAsync(x.BlockId, new MemoryStream(buffer), hash)
-                                                .ContinueWith(x => concurrencySemaphore.Release());
-                                        Console.WriteLine($"\t\t{x.N} {x.BlockId} : {hash}");
-                                        return hash;
-                                    }))
-                                    .ToArray();
+                    // there is no more blocks needed to upload
 
-                    Task.WaitAll(tasks);
+                    uploadedBlock = await blob.DownloadBlockListAsync(BlockListingFilter.Uncommitted,
+                                                                    AccessCondition.GenerateEmptyCondition(),
+                                                                    new BlobRequestOptions { },
+                                                                    new OperationContext { });
+
+                    await blob.PutBlockListAsync(uploadedBlock.Select(x => x.Name));
+                }
+                else
+                {
+                    // upload blocks
+
+                    Console.WriteLine($"\tblock size: {blockSize:##,#} bytes");
+                    Console.WriteLine($"\ttasks: {taskCount}");
+                    Console.WriteLine($"\tparallelize: {parallelize}");
+
+                    stopwatch.Restart();
+
+                    var completedCount = 0L;
+
+                    using (var concurrencySemaphore = new SemaphoreSlim(parallelize))
+                    {
+                        var policy = Policy
+                                        .Handle<Exception>()
+                                        .RetryForeverAsync(x => Console.WriteLine($"\t\tthread {Thread.CurrentThread.ManagedThreadId,5:#####} retry after {x.GetType().Name}: {x.Message}"));
+
+                        var tasks = new List<Task>();
+
+                        foreach (var taskParam in taskParams)
+                        {
+                            await concurrencySemaphore.WaitAsync();
+
+                            var (buffer, hash) = await taskParam.GetBufferAsync();
+                            var innerStopwatch = new Stopwatch();
+                            innerStopwatch.Start();
+
+
+                            tasks.Add(policy.ExecuteAsync(() => blob.PutBlockAsync(taskParam.BlockId, new MemoryStream(buffer), hash)
+                                                                    .ContinueWith(x =>
+                                                                    {
+                                                                        innerStopwatch.Stop();
+                                                                        Interlocked.Increment(ref completedCount);
+                                                                        concurrencySemaphore.Release();
+                                                                        var progress = (completedCount / (double)taskCount) * 100;
+                                                                        Console.WriteLine($"\t\tthread {Thread.CurrentThread.ManagedThreadId,5:#####}, block {taskParam.N,3:###}, {progress,5:###.#}% completed, length {buffer.Length}, elapsed {innerStopwatch.Elapsed}");
+                                                                    })));
+                        }
+                        await Task.WhenAll(tasks);
+                    }
+                    // await blob.PutBlockListAsync(taskParams.Select(x => x.BlockId));
+
+                    uploadedBlock = await blob.DownloadBlockListAsync(BlockListingFilter.Uncommitted,
+                                                                    AccessCondition.GenerateEmptyCondition(),
+                                                                    new BlobRequestOptions { },
+                                                                    new OperationContext { });
+
+                    await blob.PutBlockListAsync(uploadedBlock.Select(x => x.Name));
                 }
 
-                await blob.PutBlockListAsync(taskParams.Select(x => x.BlockId));
+                await blob.FetchAttributesAsync();
             }
             finally
             {
                 stopwatch.Stop();
                 Console.WriteLine($"\telapsed: {stopwatch.ElapsedMilliseconds:##,#} ms");
                 Console.WriteLine($"\tthroughput: {(fileSize / stopwatch.ElapsedMilliseconds):##,#} bytes/sec (~{(fileSize / stopwatch.ElapsedMilliseconds) * 8:##,#} bps)");
+                if (blob != null && blob.Properties != null)
+                {
+                    Console.WriteLine($"\tblob: {blob.Properties.Length:##,#} bytes, {blob.Properties.Created}");
+                }
                 Console.WriteLine();
             }
         }
